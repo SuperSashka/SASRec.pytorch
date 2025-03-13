@@ -1,10 +1,12 @@
-import sys
+import sys,os
 import copy
 import torch
 import random
 import numpy as np
 from collections import defaultdict
 from multiprocessing import Process, Queue
+
+sys.path.append(os.path.abspath(os.path.dirname( __file__ )))
 
 def build_index(dataset_name):
 

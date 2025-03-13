@@ -1,10 +1,16 @@
-import os
+import os,sys
 import time
 import torch
 import argparse
 
 from model import SASRec
 from utils import *
+import geometry
+
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+sys.path.append(os.path.abspath(os.path.dirname( __file__ )))
+
 
 def str2bool(s):
     if s not in {'false', 'true'}:
@@ -27,7 +33,7 @@ parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
 
-args = parser.parse_args()
+args = parser.parse_args(['--dataset', 'ml-1m', '--train_dir','default','--num_epochs', '200'])
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
     os.makedirs(args.dataset + '_' + args.train_dir)
 with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
@@ -35,6 +41,10 @@ with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as
 f.close()
 
 if __name__ == '__main__':
+
+    pos_lambda_man_reg = 0.1
+
+    neg_lambda_man_reg = 0.5
 
     u2i_index, i2u_index = build_index(args.dataset)
     
@@ -102,6 +112,27 @@ if __name__ == '__main__':
             u, seq, pos, neg = sampler.next_batch() # tuples to ndarray
             u, seq, pos, neg = np.array(u), np.array(seq), np.array(pos), np.array(neg)
             pos_logits, neg_logits = model(u, seq, pos, neg)
+
+            pos_eseq = model.item_emb(torch.tensor(pos).to('cuda'))
+            pos_affinity = geometry.pairseq_dist_affinity(pos_eseq,geometry.hyperbolic_dist)
+
+            pos_logits_dist = torch.cdist(pos_logits,pos_logits)**2
+
+            pos_lap = pos_affinity*pos_logits_dist
+
+            pos_man_reg = pos_lap.sum()
+
+            neg_eseq = model.item_emb(torch.tensor(neg).to('cuda'))
+
+            neg_affinity = geometry.pairseq_dist_affinity(neg_eseq,geometry.hyperbolic_dist)
+
+            neg_logits_dist = torch.cdist(neg_logits,neg_logits)**2
+
+            neg_lap = neg_affinity*neg_logits_dist
+
+            neg_man_reg = neg_lap.sum()
+
+
             pos_labels, neg_labels = torch.ones(pos_logits.shape, device=args.device), torch.zeros(neg_logits.shape, device=args.device)
             # print("\neye ball check raw_logits:"); print(pos_logits); print(neg_logits) # check pos_logits > 0, neg_logits < 0
             adam_optimizer.zero_grad()
@@ -109,11 +140,13 @@ if __name__ == '__main__':
             loss = bce_criterion(pos_logits[indices], pos_labels[indices])
             loss += bce_criterion(neg_logits[indices], neg_labels[indices])
             for param in model.item_emb.parameters(): loss += args.l2_emb * torch.norm(param)
+            loss += pos_lambda_man_reg*pos_man_reg
+            loss += neg_lambda_man_reg*neg_man_reg
             loss.backward()
             adam_optimizer.step()
-            print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
+            print("loss in epoch {}  iteration {}: {:.4f} graph_loss_pos {:.4f} graph_loss_neg {:.4f}".format(epoch, step, loss.item(), pos_lambda_man_reg*pos_man_reg.item(),neg_lambda_man_reg*neg_man_reg.item())) # expected 0.4~0.6 after init few epochs
 
-        if epoch % 20 == 0:
+        if (epoch % 20 == 0) or (epoch == args.num_epochs):
             model.eval()
             t1 = time.time() - t0
             T += t1

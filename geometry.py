@@ -101,3 +101,66 @@ def pairseq_dist_affinity(seq, single_dist):
     affinity = torch.exp(-pairwise_distances ** 2)  # (batch_size, batch_size)
     
     return affinity
+
+
+
+
+
+def hyperbolic_distance_matrix(embeddings):
+    """
+    Compute pairwise hyperbolic distances for item embeddings in the Poincaré ball.
+    embeddings: Tensor of shape (N, emb_dim)
+    Returns: Tensor of shape (N, N) containing pairwise hyperbolic distances.
+    """
+    # Compute squared Euclidean distances between embeddings
+    diff = embeddings.unsqueeze(0) - embeddings.unsqueeze(1)  # (N, N, emb_dim)
+    euclidean_dist_sq = torch.sum(diff ** 2, dim=2)  # (N, N)
+    
+    # Compute norms for each embedding
+    E_norm_sq = torch.sum(embeddings ** 2, dim=1, keepdim=True)  # (N, 1)
+    # Denominator for each pair (1 - ||u||^2)*(1 - ||v||^2)
+    denom = (1 - E_norm_sq) * (1 - E_norm_sq).t() + 1e-5  # (N, N)
+    
+    # Compute the argument of arccosh
+    x = 1 + 2 * euclidean_dist_sq / denom
+    x = torch.clamp(x, min=1 + 1e-5)  # ensure valid input for arccosh
+    dist = torch.acosh(x)  # (N, N)
+    return dist
+
+def euclidean_distance_matrix(embeddings):
+    """
+    Compute pairwise Euclidean distances for item embeddings.
+    embeddings: Tensor of shape (N, emb_dim)
+    Returns: Tensor of shape (N, N) containing pairwise Euclidean distances.
+    """
+    diff = embeddings.unsqueeze(0) - embeddings.unsqueeze(1)  # (N, N, emb_dim)
+    dist = torch.norm(diff, dim=2)  # (N, N)
+    return dist
+
+def manifold_regularization_embeddings(embeddings, metric='hyperbolic', sigma=1.0, lambda_reg=1.0):
+    """
+    Regularizes the embeddings directly using a Laplacian-like term.
+    
+    embeddings: Tensor of shape (N, emb_dim)
+    metric: 'euclidean' or 'hyperbolic'
+    sigma: parameter for the Gaussian affinity function
+    lambda_reg: scaling factor for the regularization term
+    
+    Returns: A scalar regularization loss.
+    """
+    if metric == 'euclidean':
+        dist = euclidean_distance_matrix(embeddings)
+    elif metric == 'hyperbolic':
+        dist = hyperbolic_distance_matrix(embeddings)
+    else:
+        raise ValueError("Unsupported metric. Use 'euclidean' or 'hyperbolic'.")
+
+    # Build affinity matrix: A_{ij} = exp(-dist(i,j)^2 / sigma^2)
+    A = torch.exp(-dist ** 2 / sigma ** 2)
+    
+    # Laplacian regularization term: sum_{i,j} A_{ij} * ||E_i - E_j||^2
+    diff = embeddings.unsqueeze(0) - embeddings.unsqueeze(1)  # (N, N, emb_dim)
+    sq_diff = torch.sum(diff ** 2, dim=2)  # (N, N)
+    
+    reg_loss = (A * sq_diff).sum()
+    return lambda_reg * reg_loss

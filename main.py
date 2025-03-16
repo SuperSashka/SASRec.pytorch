@@ -33,7 +33,7 @@ parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
 
-args = parser.parse_args(['--dataset', 'ml-1m', '--train_dir','default','--num_epochs', '2000'])
+args = parser.parse_args(['--dataset', 'ml-1m', '--train_dir','default','--num_epochs', '200'])
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
     os.makedirs(args.dataset + '_' + args.train_dir)
 with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
@@ -72,7 +72,7 @@ if __name__ == '__main__':
             pass # just ignore those failed init layers
 
     model.pos_emb.weight.data[0, :] = 0
-    model.item_emb.weight.data[0, :] = 0
+    #model.item_emb.weight.data[0, :] = 0
 
     # this fails embedding init 'Embedding' object has no attribute 'dim'
     # model.apply(torch.nn.init.xavier_uniform_)

@@ -1,5 +1,23 @@
 import numpy as np
 import torch
+import geoopt
+from geoopt import PoincareBall 
+
+#manifold = PoincareBall()
+
+class HyperbolicEmbedding(torch.nn.Module):
+    def __init__(self, num_items, emb_size):
+        super(HyperbolicEmbedding, self).__init__()
+        self.manifold = PoincareBall()
+        self.embedding_dim = emb_size
+        # Initialize embeddings as a parameter constrained to the hyperbolic space
+        self.embeddings = geoopt.ManifoldParameter(
+            self.manifold.random_normal((num_items, self.embedding_dim)), 
+            manifold=self.manifold
+        )
+
+    def forward(self, indices):
+        return self.embeddings[indices]  # Simple lookup using indices
 
 
 class PointWiseFeedForward(torch.nn.Module):
@@ -33,7 +51,8 @@ class SASRec(torch.nn.Module):
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
         # https://stackoverflow.com/questions/42704283/adding-l1-l2-regularization-in-pytorch
-        self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
+        #self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
+        self.item_emb = HyperbolicEmbedding(self.item_num + 1, args.hidden_units)
         self.pos_emb = torch.nn.Embedding(args.maxlen+1, args.hidden_units, padding_idx=0)
         self.emb_dropout = torch.nn.Dropout(p=args.dropout_rate)
 

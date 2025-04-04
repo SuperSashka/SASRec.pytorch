@@ -42,7 +42,7 @@ class PointWiseFeedForward(torch.nn.Module):
 # https://github.com/pmixer/TiSASRec.pytorch/blob/master/model.py
 
 class SASRec(torch.nn.Module):
-    def __init__(self, user_num, item_num, args):
+    def __init__(self, user_num, item_num, args, geoopt_emb = False):
         super(SASRec, self).__init__()
 
         self.user_num = user_num
@@ -51,8 +51,11 @@ class SASRec(torch.nn.Module):
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
         # https://stackoverflow.com/questions/42704283/adding-l1-l2-regularization-in-pytorch
-        #self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
-        self.item_emb = HyperbolicEmbedding(self.item_num + 1, args.hidden_units)
+        
+        if geoopt_emb:
+            self.item_emb = HyperbolicEmbedding(self.item_num + 1, args.hidden_units)
+        else:
+            self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
         self.pos_emb = torch.nn.Embedding(args.maxlen+1, args.hidden_units, padding_idx=0)
         self.emb_dropout = torch.nn.Dropout(p=args.dropout_rate)
 

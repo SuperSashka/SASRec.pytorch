@@ -7,6 +7,7 @@ from model import SASRec
 from utils import *
 import geometry
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import geoopt
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 sys.path.append(os.path.abspath(os.path.dirname( __file__ )))
@@ -33,18 +34,20 @@ parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--inference_only', default=False, type=str2bool)
 parser.add_argument('--state_dict_path', default=None, type=str)
 
-args = parser.parse_args(['--dataset', 'ml-1m', '--train_dir','default','--num_epochs', '200'])
-if not os.path.isdir(args.dataset + '_' + args.train_dir):
-    os.makedirs(args.dataset + '_' + args.train_dir)
-with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
-    f.write('\n'.join([str(k) + ',' + str(v) for k, v in sorted(vars(args).items(), key=lambda x: x[0])]))
-f.close()
 
-if __name__ == '__main__':
 
-    pos_lambda_man_reg = 0.1
 
-    neg_lambda_man_reg = 0.5
+
+def SASRec_exp(dataset = 'ml-1m', pos_lambda_man_reg = 0,neg_lambda_man_reg = 0, geoopt_emb = False, num_epochs = 2000, maxlen = 200, hidden_units = 50):
+    args = parser.parse_args(['--dataset', dataset, '--train_dir','time_{}_lambda_pos_{}_lambda_neg_{}_geoopt_{}'.format(int(time.time()),pos_lambda_man_reg,neg_lambda_man_reg,geoopt_emb),'--num_epochs', str(num_epochs)
+                              ,'--maxlen',str(maxlen),'--hidden_units', str(hidden_units)])
+
+    if not os.path.isdir(args.dataset + '_' + args.train_dir):
+        os.makedirs(args.dataset + '_' + args.train_dir)
+    with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
+        f.write('\n'.join([str(k) + ',' + str(v) for k, v in sorted(vars(args).items(), key=lambda x: x[0])]))
+    f.close()
+
 
     u2i_index, i2u_index = build_index(args.dataset)
     
@@ -63,7 +66,7 @@ if __name__ == '__main__':
     f.write('epoch (val_ndcg, val_hr) (test_ndcg, test_hr)\n')
     
     sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
-    model = SASRec(usernum, itemnum, args).to(args.device) # no ReLU activation in original SASRec implementation?
+    model = SASRec(usernum, itemnum, args, geoopt_emb=geoopt_emb).to(args.device) # no ReLU activation in original SASRec implementation?
     
     for name, param in model.named_parameters():
         try:
@@ -101,6 +104,8 @@ if __name__ == '__main__':
     # https://github.com/NVIDIA/pix2pixHD/issues/9 how could an old bug appear again...
     bce_criterion = torch.nn.BCEWithLogitsLoss() # torch.nn.BCELoss()
     adam_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.98))
+    if geoopt_emb:
+       adam_optimizer = geoopt.optim.RiemannianAdam(model.parameters(), lr=args.lr)
     #scheduler = CosineAnnealingLR(adam_optimizer, T_max=args.num_epochs)
 
 
@@ -111,30 +116,37 @@ if __name__ == '__main__':
 
     reg_loss = torch.tensor(0)
     for epoch in range(epoch_start_idx, args.num_epochs + 1):
+        loss_list = []
         if args.inference_only: break # just to decrease identition
         for step in range(num_batch): # tqdm(range(num_batch), total=num_batch, ncols=70, leave=False, unit='b'):
             u, seq, pos, neg = sampler.next_batch() # tuples to ndarray
             u, seq, pos, neg = np.array(u), np.array(seq), np.array(pos), np.array(neg)
             pos_logits, neg_logits = model(u, seq, pos, neg)
+            if pos_lambda_man_reg > 0:
+                pos_eseq = model.item_emb(torch.tensor(pos).to('cuda'))
+                pos_affinity = geometry.pairseq_dist_affinity(pos_eseq,geometry.hyperbolic_dist)
 
-            #pos_eseq = model.item_emb(torch.tensor(pos).to('cuda'))
-            # pos_affinity = geometry.pairseq_dist_affinity(pos_eseq,geometry.hyperbolic_dist)
+                pos_logits_dist = torch.cdist(pos_logits,pos_logits)**2
 
-            # pos_logits_dist = torch.cdist(pos_logits,pos_logits)**2
+                pos_lap = pos_affinity*pos_logits_dist
 
-            # pos_lap = pos_affinity*pos_logits_dist
+                pos_man_reg = pos_lap.sum()
+            else:
+                pos_man_reg=torch.tensor(0)
 
-            # pos_man_reg = pos_lap.sum()
+            if neg_lambda_man_reg > 0:
 
-            # neg_eseq = model.item_emb(torch.tensor(neg).to('cuda'))
+                neg_eseq = model.item_emb(torch.tensor(neg).to('cuda'))
 
-            # neg_affinity = geometry.pairseq_dist_affinity(neg_eseq,geometry.hyperbolic_dist)
+                neg_affinity = geometry.pairseq_dist_affinity(neg_eseq,geometry.hyperbolic_dist)
 
-            # neg_logits_dist = torch.cdist(neg_logits,neg_logits)**2
+                neg_logits_dist = torch.cdist(neg_logits,neg_logits)**2
 
-            # neg_lap = neg_affinity*neg_logits_dist
+                neg_lap = neg_affinity*neg_logits_dist
 
-            # neg_man_reg = neg_lap.sum()
+                neg_man_reg = neg_lap.sum()
+            else:
+                neg_man_reg=torch.tensor(0)
 
 
             pos_labels, neg_labels = torch.ones(pos_logits.shape, device=args.device), torch.zeros(neg_logits.shape, device=args.device)
@@ -144,8 +156,7 @@ if __name__ == '__main__':
             bce_loss = bce_criterion(pos_logits[indices], pos_labels[indices])
             bce_loss += bce_criterion(neg_logits[indices], neg_labels[indices])
             for param in model.item_emb.parameters(): bce_loss += args.l2_emb * torch.norm(param)
-            # loss += pos_lambda_man_reg*pos_man_reg
-            # loss += neg_lambda_man_reg*neg_man_reg
+
 
             # # pos_emb has shape [batch_size, max_item, emb_size]
             # pos_tensor = torch.tensor(pos, device=args.device)  # Shape: [batch_size, max_item]
@@ -170,13 +181,21 @@ if __name__ == '__main__':
 
             loss = bce_loss
 
+            if pos_lambda_man_reg > 0:
+                loss += pos_lambda_man_reg*pos_man_reg
+            if neg_lambda_man_reg > 0:
+                loss += neg_lambda_man_reg*neg_man_reg
+
             loss.backward()
             adam_optimizer.step()
+            if geoopt_emb:
+                with torch.no_grad():
+                    model.item_emb.embeddings.data = model.item_emb.manifold.projx(model.item_emb.embeddings.data)
             #print("loss in epoch {}  iteration {}: {:.4f} graph_loss_pos {:.4f} graph_loss_neg {:.4f}".format(epoch, step, loss.item(), pos_lambda_man_reg*pos_man_reg.item(),neg_lambda_man_reg*neg_man_reg.item())) # expected 0.4~0.6 after init few epochs
-
-            print("loss in epoch {}  iteration {}: {:.4f} graph_loss {:.4f}".format(epoch, step, bce_loss.item(), reg_loss.item())) # expected 0.4~0.6 after init few epochs
+            loss_list.append(loss.item())
+            #print("loss in epoch {}  iteration {}: {:.4f} graph_loss {:.4f}".format(epoch, step, bce_loss.item(), reg_loss.item())) # expected 0.4~0.6 after init few epochs
         #scheduler.step()
-
+        print("mean loss in epoch {}: {:.4f} graph_loss_pos {:.4f} graph_loss_neg {:.4f}".format(epoch, torch.mean(torch.tensor(loss_list)).item(), pos_lambda_man_reg*pos_man_reg.item(),neg_lambda_man_reg*neg_man_reg.item())) # expected 0.4~0.6 after init few epochs
 
         if (epoch % 20 == 0) or (epoch == args.num_epochs):
             model.eval()
@@ -185,8 +204,8 @@ if __name__ == '__main__':
             print('Evaluating', end='')
             t_test = evaluate(model, dataset, args)
             t_valid = evaluate_valid(model, dataset, args)
-            print('epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f)'
-                    % (epoch, T, t_valid[0], t_valid[1], t_test[0], t_test[1]))
+            valid_string = 'epoch:%d, time: %f(s), valid (NDCG@10: %.4f, HR@10: %.4f), test (NDCG@10: %.4f, HR@10: %.4f)'% (epoch, T, t_valid[0], t_valid[1], t_test[0], t_test[1])
+            print(valid_string)
 
             if t_valid[0] > best_val_ndcg or t_valid[1] > best_val_hr or t_test[0] > best_test_ndcg or t_test[1] > best_test_hr:
                 best_val_ndcg = max(t_valid[0], best_val_ndcg)
@@ -211,4 +230,19 @@ if __name__ == '__main__':
     
     f.close()
     sampler.close()
+
+
+if __name__ == '__main__':
+
+    # for i in range(10):
+    #     SASRec_exp(dataset = 'ml-1m', pos_lambda_man_reg = 0,neg_lambda_man_reg = 0, geoopt_emb = False)
+    #     SASRec_exp(dataset = 'ml-1m', pos_lambda_man_reg = 0.1,neg_lambda_man_reg = 0.5, geoopt_emb = False)
+    #     SASRec_exp(dataset = 'ml-1m', pos_lambda_man_reg = 0,neg_lambda_man_reg = 0, geoopt_emb = True)
+    for i in range(10):
+        SASRec_exp(dataset = 'Video', pos_lambda_man_reg = 0,neg_lambda_man_reg = 0, geoopt_emb = False, num_epochs = 20, maxlen=10,hidden_units=5)
+        SASRec_exp(dataset = 'Video', pos_lambda_man_reg = 0.01,neg_lambda_man_reg = 0.05, geoopt_emb = False, num_epochs=20, maxlen=10,hidden_units=5)
+        SASRec_exp(dataset = 'Video', pos_lambda_man_reg = 0,neg_lambda_man_reg = 0, geoopt_emb = True,num_epochs=20, maxlen=10,hidden_units=5)
+
+
+
     print("Done")
